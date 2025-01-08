@@ -1,4 +1,5 @@
 clear variables;
+close all; 
 
 % Modulation Order
 M = 16; % QAM modulation order
@@ -35,7 +36,6 @@ dataRate = bitsPerSymbol * fs; % Data rate in bits per second (bps)
 % Initialize full time-domain signal with guard intervals
 timeSignalWithGI = [];
 
-%totalCyclicPrefix = zeros(numSymbols * round(N * guardIntervalFraction), 1);
 %% Step 1: Emitter
 % Loop over each DMT symbol
 for i = 1:numSymbols
@@ -126,11 +126,16 @@ disp(length(timeSignalWithGI));
 % Parameters for the channel
 SNR_dB = 30; % Desired Signal-to-Noise Ratio
 filterOrder = 64; % FIR filter order, default practice
+k = 1; % Scaling factor for attenuation
 
-% Design FIR filter with k*sqrt(f) response
+% Design FIR filter with k*sqrt(f) attenuation
 f = linspace(0, 1, filterOrder/2 + 1); % Normalized frequency (0 to 1)
-magnitudeResponse = sqrt(f); % Magnitude response (k*sqrt(f))
-h = fir2(filterOrder, f, magnitudeResponse); % FIR filter design
+
+% Define gain corresponding to attenuation k*sqrt(f)
+gain = 1 ./ (1 + k * sqrt(f)); % Properly scaled gain profile
+
+% Design the FIR filter
+h = fir2(filterOrder, f, gain);
 
 % Plot the filter's frequency response
 figure;
@@ -180,8 +185,30 @@ reconstructedBits = zeros(size(dataBits)); % Pre-allocate for efficiency
 
 % Define channel response
 f = (0:N-1) / N; % Normalized frequency
-k = 1; % Gain factor
-H = k * sqrt(f); % Channel frequency response
+H = 1 ./ (1 + k * sqrt(f)); % Corrected channel frequency response (low-pass behavior)
+% Compute impulse response
+impulseResponse = ifft(H); % Time-domain impulse response of the channel
+
+% Plot impulse response
+figure;
+stem(abs(impulseResponse), 'filled'); % Magnitude of impulse response
+title('Channel Impulse Response');
+xlabel('Sample Index');
+ylabel('Magnitude');
+grid on;
+hold on;
+
+% Mark the guard interval
+xline(guardIntervalLength, 'r--', 'Guard Interval');
+legend('Impulse Response', 'Guard Interval');
+
+% Check if impulse response fits within the guard interval
+significantSamples = impulseResponse(abs(impulseResponse) > 1e-3); % Threshold to identify significant response
+if max(significantSamples) <= guardIntervalLength
+    disp('Impulse response fits within the guard interval.');
+else
+    disp('Impulse response exceeds the guard interval.');
+end
 
 for i = 1:numSymbols
     % Extract the current DMT symbol
@@ -191,22 +218,35 @@ for i = 1:numSymbols
 
     % Remove guard interval
     receivedSymbol = receivedSymbol(guardIntervalLength+1:end);
-
+    
     % Perform FFT to demodulate
     freqSignal = fft(receivedSymbol, N);
-
+   
     % Extract active subcarriers
-    activeSubcarriersData = freqSignal(activeSubcarriers + 1);
-
+    activeSubcarriersData = freqSignal(activeSubcarriers + 1).';
+    if i == 1
+        scatterplot(activeSubcarriersData(:)); % Flatten to a vector
+        xline([-1.26, -0.63, 0,0.63, 1.26], '--r'); % Add vertical decision boundaries for 16-QAM
+        yline([-1.26, -0.63, 0,0.63, 1.26], '--r'); % Add horizontal decision boundaries
+        xlim([-1.3, 1.3]);% to make it look pretty
+        ylim([-1.3, 1.3]);
+        title('QAM Constellation before equalization- First Symbol');
+    end
     % Equalize the signal (Zero-Forcing Equalization)
     epsilon = 1e-12; % Small value to avoid division by zero
-    eqH = (conj(H(activeSubcarriers + 1)) ./ (abs(H(activeSubcarriers + 1)).^2 + epsilon)).'; % Equalize
+    eqH = conj(H(activeSubcarriers + 1)) ./ (abs(H(activeSubcarriers + 1)).^2 + epsilon); % Equalize
     equalizedSubcarriers = eqH .* activeSubcarriersData;
 
     % Debug scatter plot for first symbol after equalization
     if i == 1
         scatterplot(equalizedSubcarriers(:)); % Flatten to a vector
-        title('Equalized QAM Constellation - First Symbol');
+        hold on;
+        xline([-1.26, -0.63, 0,0.63, 1.26], '--r'); % Add vertical decision boundaries for 16-QAM
+        yline([-1.26, -0.63, 0,0.63, 1.26], '--r'); % Add horizontal decision boundaries
+        xlim([-1.3, 1.3]);% to make it look pretty
+        ylim([-1.3, 1.3]);
+        title('Equalized QAM Constellation with Decision Boundaries - First Symbol');
+        hold off;
     end
 
     % Demodulate QAM symbols for active subcarriers
@@ -223,7 +263,6 @@ for i = 1:numSymbols
     if length(rDataBits) ~= expectedBitsPerSymbol
         error(['Mismatch in bit lengths for Symbol ', num2str(i)]);
     end
-
 
     % Map reconstructed bits back to their original position
     bitStartIdx = (i - 1) * expectedBitsPerSymbol + 1;
@@ -245,28 +284,12 @@ disp(['Number of Erroneous Bits: ', num2str(numErrors)]);
 disp(['Total Number of Transmitted Bits: ', num2str(length(dataBits))]);
 disp(['Bit Error Rate (BER): ', num2str(BER)]);
 
-%% Pas 4: SNR and MSE
+%% Step 4: Calculate SNR
 
- % Signal Power (original signal)
-signalPower = mean(abs(timeSignalWithGI).^2);
-
-% Noise Power (difference between noisy and clean signal)
-noisePower = mean(abs(noisySignal - timeSignalWithGI).^2);
-
-% SNR in dB
-SNR_dB_calculated = 10 * log10(signalPower / noisePower);
-disp(['Calculated SNR (dB): ', num2str(SNR_dB_calculated)]);
-
-% MSE Without Equalization
-mseWithoutEq = sum(abs(noisySignal - timeSignalWithGI).^2) / length(receivedSymbol);
-disp(['MSE Without Equalization: ', num2str(mseWithoutEq)]);
-
-% MSE With Equalization
-% Compare transmitted QAM symbols and reconstructed QAM symbols
-% Flatten both for comparison
-transmittedQAM = qamSymbols(:); % Original QAM symbols
-receivedQAM = equalizedSubcarriers(:); % Equalized QAM symbols
-
-% Compute MSE with equalization
-mseWithEq = sum(abs(transmittedQAM - receivedQAM).^2) / length(receivedSymbol);
-disp(['MSE With Equalization: ', num2str(mseWithEq)]);
+signalPower = mean(abs(filteredSignal).^2); % Use the filtered signal before adding noise
+noisePower = mean(abs(noise).^2); % Use the noise vector added to the signal
+c_SNR = signalPower / noisePower; % Linear SNR
+c_SNR_dB = 10 * log10(c_SNR); % SNR in decibels
+targetNoisePower = signalPower / (10^(SNR_dB / 10));
+disp(['Calculated SNR = ',num2str(c_SNR), ' = ', num2str(c_SNR_dB), ' dB. The initiated value was ', num2str(SNR_dB), ' dB.']);
+disp(['Calculated Noise Power (P_noise): ', num2str(targetNoisePower)]);
